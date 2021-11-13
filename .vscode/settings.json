@@ -1,0 +1,16 @@
+{
+    // used in docker `onnxmlirczar/onnx-mlir-dev:latest`
+    "cmake.configureSettings": {
+        "BUILD_SHARED_LIBS": "ON",
+        // "CMAKE_PREFIX_PATH": "",
+        "CMAKE_INSTALL_PREFIX": "install",
+        "MLIR_DIR": "/workdir/llvm-project/build/lib/cmake/mlir",
+    },
+    // "terminal.integrated.env.linux": {
+    //     "PYTHONPATH": "${workspaceFolder}/python:${env:PYTHONPATH}",
+    // },
+    // "python.analysis.extraPaths": [
+    //     "python",
+    //     "${fileDirname}"
+    // ],
+}
