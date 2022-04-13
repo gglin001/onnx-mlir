@@ -22,11 +22,11 @@
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include "src/Compiler/CompilerOptions.hpp"
 #include "src/Dialect/Krnl/KrnlOps.hpp"
 #include "src/Dialect/ONNX/ONNXOps.hpp"
 #include "src/Interface/ShapeInferenceOpInterface.hpp"
 #include "src/Pass/Passes.hpp"
-#include "src/Support/OMOptions.hpp"
 
 using namespace mlir;
 
@@ -54,10 +54,10 @@ llvm::cl::bits<InstrumentActions> InstrumentControlBits(
             InstrumentReportTime, "instrument runtime reports time usage"),
         clEnumVal(
             InstrumentReportMemory, "instrument runtime reports memory usage")),
-    llvm::cl::cat(OMPassOptions));
+    llvm::cl::cat(onnx_mlir::OMPassOptions));
 
 class InstrumentONNXPass
-    : public mlir::PassWrapper<InstrumentONNXPass, FunctionPass> {
+    : public mlir::PassWrapper<InstrumentONNXPass, OperationPass<FuncOp>> {
 
 private:
   bool allOpsAllowed;
@@ -84,36 +84,38 @@ public:
     runtimeActions = InstrumentControlBits.getBits();
   };
 
-  void runOnFunction() override {
-    if (instrumentONNXOps == "" || instrumentONNXOps == "NONE")
+  void runOnOperation() override {
+    if (onnx_mlir::instrumentONNXOps == "" ||
+        onnx_mlir::instrumentONNXOps == "NONE")
       return;
-    init(instrumentONNXOps);
-    auto function = getFunction();
-    auto &funcBody = function.getBody();
+    init(onnx_mlir::instrumentONNXOps);
 
-    // Iterate on the operations
-    for (Operation &op : funcBody.getOps()) {
-      if (isa<mlir::ONNXOpsDialect>(op.getDialect())) {
+    // Iterate on the operations nested in this function
+    getOperation().walk([&](mlir::Operation *op) {
+      if (isa<mlir::ONNXDialect>(op->getDialect())) {
         // Skip the prefix "onnx." of onnx op name
-        const char *opName = op.getName().getStringRef().data() + 5;
+        const char *opName = op->getName().getStringRef().data() + 5;
         if (!allOpsAllowed && allowedOps.find(opName) == allowedOps.end())
-          continue;
+          return;
 
-        Location loc = op.getLoc();
-        OpBuilder opBuilder(&op);
+        Location loc = op->getLoc();
+        OpBuilder opBuilder(op);
         if (InstrumentControlBits.isSet(InstrumentBeforeOp)) {
           uint64_t tag =
               runtimeActions & (~(1 << static_cast<int>(InstrumentAfterOp)));
-          opBuilder.create<mlir::KrnlInstrumentOp>(loc, &op, tag);
+          opBuilder.create<mlir::KrnlInstrumentOp>(loc, op, tag);
         }
-        if (InstrumentControlBits.isSet(InstrumentAfterOp)) {
-          opBuilder.setInsertionPointAfter(&op);
+
+        // Can not insert after Op (e.g. ONNXReturnOP) with IsTerminator Trait
+        if (InstrumentControlBits.isSet(InstrumentAfterOp) &&
+            !op->hasTrait<OpTrait::IsTerminator>()) {
+          opBuilder.setInsertionPointAfter(op);
           uint64_t tag =
               runtimeActions & (~(1 << static_cast<int>(InstrumentBeforeOp)));
-          opBuilder.create<mlir::KrnlInstrumentOp>(loc, &op, tag);
+          opBuilder.create<mlir::KrnlInstrumentOp>(loc, op, tag);
         }
       }
-    }
+    });
   }
 };
 } // end anonymous namespace
@@ -121,6 +123,6 @@ public:
 /*!
  * Create an instrumentation pass.
  */
-std::unique_ptr<mlir::Pass> mlir::createInstrumentONNXPass() {
+std::unique_ptr<mlir::Pass> onnx_mlir::createInstrumentONNXPass() {
   return std::make_unique<InstrumentONNXPass>();
 }

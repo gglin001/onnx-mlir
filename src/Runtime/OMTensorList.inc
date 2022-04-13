@@ -54,8 +54,9 @@ struct OMTensorList {
   ~OMTensorList() {
     /* Destroy all the OMTensors */
     for (int64_t i = 0; i < _size; i++)
-      if (_omts[i])
-        omTensorDestroy(_omts[i]);
+      omTensorDestroy(_omts[i]);
+    if (_owning)
+      free(_omts);
   };
 #endif
 
@@ -68,9 +69,9 @@ struct OMTensorList {
   int64_t _size; // Number of elements in _omts.
 
   int64_t _owning; // indicates whether the OMTensorList owns the pointer to
-               // OMTensor array or not. OMTensorList struct will release the
-               // memory space referred to by '_omts' upon destruction if and
-               // only if it owns it.
+                   // OMTensor array or not. OMTensorList struct will release
+                   // the memory space referred to by '_omts' upon destruction
+                   // if and only if it owns it.
 };
 
 /* OMTensorList creator */
@@ -98,9 +99,10 @@ OMTensorList *omTensorListCreateWithOwnership(
 
 /* OMTensorList destroyer */
 void omTensorListDestroy(OMTensorList *list) {
+  if (!list)
+    return;
   for (int64_t i = 0; i < list->_size; i++)
-    if (list->_omts[i])
-      omTensorDestroy(list->_omts[i]);
+    omTensorDestroy(list->_omts[i]);
   if (list->_owning)
     free(list->_omts);
   free(list);

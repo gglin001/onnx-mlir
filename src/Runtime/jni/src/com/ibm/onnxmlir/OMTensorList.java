@@ -1,5 +1,12 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package com.ibm.onnxmlir;
 
+/**
+ * Class holding an array of OMTensor so that they can
+ * be passed into and out of the compiled model runtime
+ * entry point as inputs and outputs.
+ */
 public class OMTensorList {
 
     private OMTensor[] _omts;

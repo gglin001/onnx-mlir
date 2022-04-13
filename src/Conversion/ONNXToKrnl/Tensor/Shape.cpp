@@ -2,9 +2,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//===----------------Shape.cpp - Lowering Shape Op----------------------=== //
+//===----------------- Shape.cpp - Lowering Shape Op ----------------------===//
 //
-// Copyright 2020 The IBM Research Authors.
+// Copyright 2020-2022 The IBM Research Authors.
 //
 // =============================================================================
 //
@@ -18,21 +18,24 @@
 
 using namespace mlir;
 
+namespace onnx_mlir {
+
 struct ONNXShapeOpLowering : public ConversionPattern {
-  ONNXShapeOpLowering(MLIRContext *ctx)
-      : ConversionPattern(mlir::ONNXShapeOp::getOperationName(), 1, ctx) {}
+  ONNXShapeOpLowering(TypeConverter &typeConverter, MLIRContext *ctx)
+      : ConversionPattern(
+            typeConverter, mlir::ONNXShapeOp::getOperationName(), 1, ctx) {}
 
   LogicalResult matchAndRewrite(Operation *op, ArrayRef<Value> operands,
       ConversionPatternRewriter &rewriter) const final {
     // Get shape.
     ONNXShapeOpAdaptor operandAdaptor(operands);
-    ONNXShapeOp shapeOp = llvm::dyn_cast<ONNXShapeOp>(op);
+    ONNXShapeOp shapeOp = cast<ONNXShapeOp>(op);
     Location loc = op->getLoc();
     ONNXShapeOpShapeHelper shapeHelper(&shapeOp, &rewriter,
-        getDenseElementAttributeFromKrnlValue,
-        loadDenseElementArrayValueAtIndex);
+        krnl::getDenseElementAttributeFromKrnlValue,
+        krnl::loadDenseElementArrayValueAtIndex);
     LogicalResult shapecomputed = shapeHelper.computeShape(operandAdaptor);
-    assert(succeeded(shapecomputed));
+    assert(succeeded(shapecomputed) && "Could not compute output shape");
 
     // TODO: if the dimensions are known at compile time
     // (shapeHelper.dimsForOutput literal), then we could use a constant array.
@@ -40,23 +43,26 @@ struct ONNXShapeOpLowering : public ConversionPattern {
     MemRefType outputMemRefType = convertToMemRefType(*op->result_type_begin());
     Type elementType = outputMemRefType.getElementType();
     Value alloc = insertAllocAndDeallocSimple(
-        rewriter, op, outputMemRefType, loc, shapeHelper.dimsForOutput(0));
+        rewriter, op, outputMemRefType, loc, shapeHelper.dimsForOutput());
+
+    // Compute the data selected by the Shape operator.
+    DimsExpr selectedData = computeSelectedData(operandAdaptor);
 
     // Iterate along the data shape storing dim value to result.
-    KrnlBuilder createKrnl(rewriter, loc);
-    MathBuilder createMath(createKrnl);
-    uint64_t dataRank = shapeHelper.selectedData.size();
-    for (uint64_t i = 0; i < dataRank; ++i) {
-      Value val = shapeHelper.selectedData[i].getValue();
-      Value intVal = createMath.cast(elementType, val);
-      createKrnl.storeIE(intVal, alloc, {LiteralIndexExpr(i)});
+    MultiDialectBuilder<KrnlBuilder, MathBuilder> create(rewriter, loc);
+    for (uint64_t i = 0; i < selectedData.size(); ++i) {
+      Value val = selectedData[i].getValue();
+      Value intVal = create.math.cast(elementType, val);
+      create.krnl.storeIE(intVal, alloc, {LiteralIndexExpr(i)});
     }
     rewriter.replaceOp(op, alloc);
     return success();
   }
 };
 
-void populateLoweringONNXShapeOpPattern(
-    RewritePatternSet &patterns, MLIRContext *ctx) {
-  patterns.insert<ONNXShapeOpLowering>(ctx);
+void populateLoweringONNXShapeOpPattern(RewritePatternSet &patterns,
+    TypeConverter &typeConverter, MLIRContext *ctx) {
+  patterns.insert<ONNXShapeOpLowering>(typeConverter, ctx);
 }
+
+} // namespace onnx_mlir

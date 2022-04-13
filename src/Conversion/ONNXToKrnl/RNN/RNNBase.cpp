@@ -17,6 +17,8 @@
 
 using namespace mlir;
 
+namespace onnx_mlir {
+
 // Check a Value's type is none or not.
 bool isNoneType(Value val) { return val.getType().isa<NoneType>(); }
 
@@ -85,65 +87,66 @@ void initializeIntermediateStates(ConversionPatternRewriter &rewriter,
   Value oneIndex = emitConstantOp(rewriter, loc, rewriter.getIndexType(), 1);
 
   int nLoops = 2;
-  BuildKrnlLoop initializationLoops(rewriter, loc, nLoops);
-  if (direction == FORWARD || direction == BIDIRECTIONAL)
-    initializationLoops.createDefineAndIterateOp(forwardHt);
-  else
-    initializationLoops.createDefineAndIterateOp(reverseHt);
-  auto ipInitializationLoops = rewriter.saveInsertionPoint();
-  rewriter.setInsertionPointToStart(initializationLoops.getIterateBlock());
-  {
-    KrnlBuilder createKrnl(rewriter, loc);
-    SmallVector<Value, 4> IVs;
-    IVs.emplace_back(initializationLoops.getInductionVar(0));
-    IVs.emplace_back(initializationLoops.getInductionVar(1));
+  IndexExprScope childScope(&rewriter, loc);
+  KrnlBuilder createKrnl(rewriter, loc);
+  ValueRange loopDef = createKrnl.defineLoops(nLoops);
+  SmallVector<IndexExpr, 4> lbs(nLoops, LiteralIndexExpr(0));
+  MemRefBoundsIndexCapture bounds(
+      (direction == FORWARD || direction == BIDIRECTIONAL) ? forwardHt
+                                                           : reverseHt);
+  SmallVector<IndexExpr, 4> ubs;
+  bounds.getDimList(ubs);
+  createKrnl.iterateIE(loopDef, loopDef, lbs, ubs,
+      [&](KrnlBuilder &createKrnl, ValueRange loopInd) {
+        SmallVector<Value, 4> IVs;
+        IVs.emplace_back(loopInd[0]);
+        IVs.emplace_back(loopInd[1]);
 
-    if (direction == FORWARD || direction == BIDIRECTIONAL) {
-      SmallVector<Value, 4> initialIVs;
-      initialIVs.emplace_back(zeroIndex);
-      initialIVs.emplace_back(initializationLoops.getInductionVar(0));
-      initialIVs.emplace_back(initializationLoops.getInductionVar(1));
-      if (isNoneType(initialH))
-        createKrnl.store(zero, forwardHt, IVs);
-      else {
-        Value h = createKrnl.load(initialH, initialIVs);
-        createKrnl.store(h, forwardHt, IVs);
-      }
-      if (!onlyHidden) {
-        if (isNoneType(initialC))
-          createKrnl.store(zero, forwardCt, IVs);
-        else {
-          Value c = createKrnl.load(initialC, initialIVs);
-          createKrnl.store(c, forwardCt, IVs);
+        if (direction == FORWARD || direction == BIDIRECTIONAL) {
+          SmallVector<Value, 4> initialIVs;
+          initialIVs.emplace_back(zeroIndex);
+          initialIVs.emplace_back(loopInd[0]);
+          initialIVs.emplace_back(loopInd[1]);
+          if (isNoneType(initialH))
+            createKrnl.store(zero, forwardHt, IVs);
+          else {
+            Value h = createKrnl.load(initialH, initialIVs);
+            createKrnl.store(h, forwardHt, IVs);
+          }
+          if (!onlyHidden) {
+            if (isNoneType(initialC))
+              createKrnl.store(zero, forwardCt, IVs);
+            else {
+              Value c = createKrnl.load(initialC, initialIVs);
+              createKrnl.store(c, forwardCt, IVs);
+            }
+          }
         }
-      }
-    }
 
-    if (direction == REVERSE || direction == BIDIRECTIONAL) {
-      SmallVector<Value, 4> initialIVs;
-      if (direction == REVERSE)
-        initialIVs.emplace_back(zeroIndex);
-      else
-        initialIVs.emplace_back(oneIndex);
-      initialIVs.emplace_back(initializationLoops.getInductionVar(0));
-      initialIVs.emplace_back(initializationLoops.getInductionVar(1));
-      if (isNoneType(initialH))
-        createKrnl.store(zero, reverseHt, IVs);
-      else {
-        Value h = createKrnl.load(initialH, initialIVs);
-        createKrnl.store(h, reverseHt, IVs);
-      }
-      if (!onlyHidden) {
-        if (isNoneType(initialC))
-          createKrnl.store(zero, reverseCt, IVs);
-        else {
-          Value c = createKrnl.load(initialC, initialIVs);
-          createKrnl.store(c, reverseCt, IVs);
+        if (direction == REVERSE || direction == BIDIRECTIONAL) {
+          SmallVector<Value, 4> initialIVs;
+          if (direction == REVERSE)
+            initialIVs.emplace_back(zeroIndex);
+          else
+            initialIVs.emplace_back(oneIndex);
+          initialIVs.emplace_back(loopInd[0]);
+          initialIVs.emplace_back(loopInd[1]);
+          if (isNoneType(initialH))
+            createKrnl.store(zero, reverseHt, IVs);
+          else {
+            Value h = createKrnl.load(initialH, initialIVs);
+            createKrnl.store(h, reverseHt, IVs);
+          }
+          if (!onlyHidden) {
+            if (isNoneType(initialC))
+              createKrnl.store(zero, reverseCt, IVs);
+            else {
+              Value c = createKrnl.load(initialC, initialIVs);
+              createKrnl.store(c, reverseCt, IVs);
+            }
+          }
         }
-      }
-    }
-  }
-  rewriter.restoreInsertionPoint(ipInitializationLoops);
+      });
 }
 
 /// Insert Allocate and Deallocate for the hidden or cell output.
@@ -176,21 +179,18 @@ Value allocHiddenOrCell(ConversionPatternRewriter &rewriter, Location loc,
 void initializeHiddenAndCell(ConversionPatternRewriter &rewriter, Location loc,
     Value ht, Value ct, Value initialH, Value initialC, Type elementType,
     bool onlyHidden) {
-  // TODO remove
-  // scope(rewriter, loc);
-  KrnlBuilder createKrnl(rewriter, loc);
-  MemRefBuilder createMemRef(createKrnl);
-  MathBuilder createMath(createKrnl);
-  Value zero = emitConstantOp(rewriter, loc, elementType, 0);
+  MultiDialectBuilder<KrnlBuilder, MathBuilder, MemRefBuilder> create(
+      rewriter, loc);
+  Value zero = create.math.constant(elementType, 0);
   unsigned htRank = ht.getType().cast<MemRefType>().getRank();
-  Value iZero = createMath.constantIndex(0);
+  Value iZero = create.math.constantIndex(0);
   SmallVector<Value, 4> htLbs(htRank, iZero);
   SmallVector<Value, 4> htUbs;
   for (unsigned r = 0; r < htRank; ++r) {
-    htUbs.emplace_back(createMemRef.dim(ht, r));
+    htUbs.emplace_back(create.mem.dim(ht, r));
   }
-  ValueRange loops = createKrnl.defineLoops(htRank);
-  createKrnl.iterate(loops, loops, htLbs, htUbs,
+  ValueRange loops = create.krnl.defineLoops(htRank);
+  create.krnl.iterate(loops, loops, htLbs, htUbs,
       [&](KrnlBuilder &createKrnl, ValueRange indices) {
         Value hiddenVal = zero;
         if (!isNoneType(initialH))
@@ -213,24 +213,23 @@ void stateToOutputForHiddenOrCell(ConversionPatternRewriter &rewriter,
     Location loc, Value forwardVal, Value reverseVal, StringRef direction,
     Value output) {
   // TODO remove
-  KrnlBuilder createKrnl(rewriter, loc);
-  MemRefBuilder createMemRef(createKrnl);
-  MathBuilder createMath(createKrnl);
+  MultiDialectBuilder<KrnlBuilder, MathBuilder, MemRefBuilder> create(
+      rewriter, loc);
   if (direction == FORWARD || direction == REVERSE) {
     Value val = (direction == FORWARD) ? forwardVal : reverseVal;
     Value sizeInBytes = getDynamicMemRefSizeInBytes(rewriter, loc, val);
-    createKrnl.memcpy(output, val, sizeInBytes);
+    create.krnl.memcpy(output, val, sizeInBytes);
   } else { // BIDIRECTIONAL
     unsigned rank = forwardVal.getType().cast<MemRefType>().getRank();
-    Value zero = createMath.constantIndex(0);
-    Value one = createMath.constantIndex(1);
+    Value zero = create.math.constantIndex(0);
+    Value one = create.math.constantIndex(1);
     SmallVector<Value, 4> lbs(rank, zero);
     SmallVector<Value, 4> ubs;
     for (unsigned r = 0; r < rank; ++r) {
-      ubs.emplace_back(createMemRef.dim(forwardVal, r));
+      ubs.emplace_back(create.mem.dim(forwardVal, r));
     }
-    ValueRange loops = createKrnl.defineLoops(2);
-    createKrnl.iterate(loops, loops, lbs, ubs,
+    ValueRange loops = create.krnl.defineLoops(2);
+    create.krnl.iterate(loops, loops, lbs, ubs,
         [&](KrnlBuilder &createKrnl, ValueRange indices) {
           Value b(indices[0]), h(indices[1]);
           // Forward.
@@ -248,15 +247,6 @@ Value applyActivation(OpBuilder &rewriter, Location loc,
     RNNActivation activation, Value operand) {
   Value res;
 
-  bool isScalar = !operand.getType().isa<ShapedType>();
-  assert(isScalar && "Not a scalar operand");
-
-  MemRefType memRefType = MemRefType::get({}, operand.getType(), {}, 0);
-  // Single scalar, no need for default alignment.
-  MemRefBuilder createMemRef(rewriter, loc);
-  Value alloc = createMemRef.alloca(memRefType);
-  rewriter.create<KrnlStoreOp>(loc, operand, alloc, ArrayRef<Value>{});
-
   std::vector<mlir::NamedAttribute> attributes;
   if (activation.alpha) {
     attributes.emplace_back(
@@ -266,36 +256,34 @@ Value applyActivation(OpBuilder &rewriter, Location loc,
     attributes.emplace_back(
         rewriter.getNamedAttr("beta", activation.beta.getValue()));
   }
+  Type resType = operand.getType();
 
   // Change equality to be case insensitive.
   if (activation.name.equals_insensitive("relu"))
-    res = rewriter.create<ONNXReluOp>(loc, memRefType, alloc);
+    res = rewriter.create<ONNXReluOp>(loc, resType, operand);
   else if (activation.name.equals_insensitive("tanh"))
-    res = rewriter.create<ONNXTanhOp>(loc, memRefType, alloc);
+    res = rewriter.create<ONNXTanhOp>(loc, resType, operand);
   else if (activation.name.equals_insensitive("sigmoid"))
-    res = rewriter.create<ONNXSigmoidOp>(loc, memRefType, alloc);
+    res = rewriter.create<ONNXSigmoidOp>(loc, resType, operand);
   else if (activation.name.equals_insensitive("affine"))
     llvm_unreachable("Unsupported activation");
   else if (activation.name.equals_insensitive("leakyrelu"))
-    res = rewriter.create<ONNXLeakyReluOp>(loc, memRefType, alloc, attributes);
+    res = rewriter.create<ONNXLeakyReluOp>(loc, resType, operand, attributes);
   else if (activation.name.equals_insensitive("thresholdedrelu"))
     res = rewriter.create<ONNXThresholdedReluOp>(
-        loc, memRefType, alloc, attributes);
+        loc, resType, operand, attributes);
   else if (activation.name.equals_insensitive("scaledtanh"))
     llvm_unreachable("Unsupported activation");
   else if (activation.name.equals_insensitive("hardsigmoid"))
-    res =
-        rewriter.create<ONNXHardSigmoidOp>(loc, memRefType, alloc, attributes);
+    res = rewriter.create<ONNXHardSigmoidOp>(loc, resType, operand, attributes);
   else if (activation.name.equals_insensitive("elu"))
-    res = rewriter.create<ONNXEluOp>(loc, memRefType, alloc, attributes);
+    res = rewriter.create<ONNXEluOp>(loc, resType, operand, attributes);
   else if (activation.name.equals_insensitive("softsign"))
-    res = rewriter.create<ONNXSoftsignOp>(loc, memRefType, alloc);
+    res = rewriter.create<ONNXSoftsignOp>(loc, resType, operand);
   else if (activation.name.equals_insensitive("softplus"))
-    res = rewriter.create<ONNXSoftplusOp>(loc, memRefType, alloc);
+    res = rewriter.create<ONNXSoftplusOp>(loc, resType, operand);
   else
     llvm_unreachable("Unsupported activation");
-
-  res = rewriter.create<KrnlLoadOp>(loc, res);
 
   return res;
 }
@@ -308,9 +296,8 @@ Value emitXSliceAt(ConversionPatternRewriter &rewriter, Location loc, Value X,
     Value timestepIV) {
   // TODO remove
   IndexExprScope scope(&rewriter, loc);
-  KrnlBuilder createKrnl(rewriter, loc);
-  MemRefBuilder createMemRef(createKrnl);
-  MathBuilder createMath(createKrnl);
+  MultiDialectBuilder<KrnlBuilder, MathBuilder, MemRefBuilder> create(
+      rewriter, loc);
 
   int64_t batchSize = dimAt(X, 1);
   int64_t inputSize = dimAt(X, 2);
@@ -326,14 +313,14 @@ Value emitXSliceAt(ConversionPatternRewriter &rewriter, Location loc, Value X,
       rewriter, nullptr, sliceXType, loc, dims, /*insertDealloc=*/false);
 
   // Copy data from X.
-  Value iZero = createMath.constantIndex(0);
+  Value iZero = create.math.constantIndex(0);
   SmallVector<Value, 2> lbs(2, iZero);
   SmallVector<Value, 2> ubs;
   for (unsigned r = 0; r < 2; ++r) {
-    ubs.emplace_back(createMemRef.dim(sliceX, r));
+    ubs.emplace_back(create.mem.dim(sliceX, r));
   }
-  ValueRange loops = createKrnl.defineLoops(2);
-  createKrnl.iterate(
+  ValueRange loops = create.krnl.defineLoops(2);
+  create.krnl.iterate(
       loops, loops, lbs, ubs, [&](KrnlBuilder &createKrnl, ValueRange indices) {
         Value b(indices[0]), i(indices[1]);
         Value val = createKrnl.load(X, {timestepIV, b, i});
@@ -342,3 +329,5 @@ Value emitXSliceAt(ConversionPatternRewriter &rewriter, Location loc, Value X,
 
   return sliceX;
 }
+
+} // namespace onnx_mlir

@@ -68,12 +68,20 @@ function(add_onnx_mlir_dialect_doc dialect dialect_tablegen_file)
   add_custom_target(${dialect}DocGen DEPENDS ${GEN_DOC_FILE})
   add_dependencies(onnx-mlir-docs ${dialect}DocGen)
 endfunction()
-add_custom_target(onnx-mlir-docs ALL)
+add_custom_target(onnx-mlir-docs)
 
-function(add_onnx_mlir_dialect dialect)
+# If an extra parameter, the dialect name, is provided,
+# this function will generate dialect and type from the td file
+function(add_onnx_mlir_dialect dialect dialect_name)
   set(LLVM_TARGET_DEFINITIONS ${dialect}.td)
-  mlir_tablegen(${dialect}.hpp.inc -gen-op-decls "-I${ONNX_MLIR_SRC_ROOT}")
-  mlir_tablegen(${dialect}.cpp.inc -gen-op-defs "-I${ONNX_MLIR_SRC_ROOT}")
+  mlir_tablegen(${dialect}Ops.hpp.inc -gen-op-decls "-I${ONNX_MLIR_SRC_ROOT}")
+  mlir_tablegen(${dialect}Ops.cpp.inc -gen-op-defs "-I${ONNX_MLIR_SRC_ROOT}")
+  mlir_tablegen(${dialect}Dialect.hpp.inc -gen-dialect-decls -dialect=${dialect_name} "-I${ONNX_MLIR_SRC_ROOT}")
+  mlir_tablegen(${dialect}Dialect.cpp.inc -gen-dialect-defs -dialect=${dialect_name} "-I${ONNX_MLIR_SRC_ROOT}")
+  mlir_tablegen(${dialect}Types.hpp.inc -gen-typedef-decls -typedefs-dialect=${dialect_name} "-I${ONNX_MLIR_SRC_ROOT}")
+  mlir_tablegen(${dialect}Types.cpp.inc -gen-typedef-defs -typedefs-dialect=${dialect_name} "-I${ONNX_MLIR_SRC_ROOT}")
+  mlir_tablegen(${dialect}Attributes.hpp.inc -gen-attrdef-decls -attrdefs-dialect=${dialect_name} "-I${ONNX_MLIR_SRC_ROOT}")
+  mlir_tablegen(${dialect}Attributes.cpp.inc -gen-attrdef-defs -attrdefs-dialect=${dialect_name} "-I${ONNX_MLIR_SRC_ROOT}")
   add_public_tablegen_target(OM${dialect}IncGen)
 endfunction()
 
@@ -92,7 +100,7 @@ endfunction()
 
 # add_onnx_mlir_library(name sources...
 #   This function (generally) has the same semantic as add_library. In
-#   addition is supports the arguments below and it does the following
+#   addition it supports the arguments below and it does the following
 #   by default (unless an argument overrides this):
 #   1. Add the library
 #   2. Add the default target_include_directories
@@ -108,12 +116,15 @@ endfunction()
 #     Same semantics as target_include_directories().
 #   LINK_LIBS lib_targets...
 #     Same semantics as target_link_libraries().
+#   LINK_COMPONENTS llvm_components...
+#     Link the specified LLVM components.
+#     Note: only one linkage mode can be specified.
 #   )
 function(add_onnx_mlir_library name)
   cmake_parse_arguments(ARG
     "EXCLUDE_FROM_OM_LIBS;NO_INSTALL"
     ""
-    "DEPENDS;INCLUDE_DIRS;LINK_LIBS"
+    "DEPENDS;INCLUDE_DIRS;ACCEL_INCLUDE_DIRS;LINK_LIBS;LINK_COMPONENTS"
     ${ARGN}
     )
 
@@ -132,6 +143,10 @@ function(add_onnx_mlir_library name)
     target_include_directories(${name} ${ARG_INCLUDE_DIRS})
   endif()
 
+  if (ARG_ACCEL_INCLUDE_DIRS)
+    target_include_directories(${name} ${ARG_ACCEL_INCLUDE_DIRS})
+  endif()
+
   target_include_directories(${name}
     PUBLIC
     ${ONNX_MLIR_SRC_ROOT}
@@ -140,6 +155,21 @@ function(add_onnx_mlir_library name)
 
   if (ARG_LINK_LIBS)
     target_link_libraries(${name} ${ARG_LINK_LIBS})
+  endif()
+
+  if (ARG_LINK_COMPONENTS)
+    set(LinkageMode)
+    if (ARG_LINK_COMPONENTS MATCHES "^(PUBLIC|PRIVATE|INTERFACE)")
+      list(POP_FRONT ARG_LINK_COMPONENTS LinkageMode)
+    endif()
+
+    llvm_map_components_to_libnames(COMPONENT_LIBS ${ARG_LINK_COMPONENTS})
+
+    if (LinkageMode)
+      target_link_libraries(${name} ${LinkageMode} ${COMPONENT_LIBS})
+    else()
+      target_link_libraries(${name} PRIVATE ${COMPONENT_LIBS})
+    endif()
   endif()
 
   if (NOT ARG_NO_INSTALL)
@@ -174,7 +204,12 @@ function(add_onnx_mlir_executable name)
     ${ARGN}
     )
 
-  add_executable(${name} ${ARG_UNPARSED_ARGUMENTS})
+  if (EXCLUDE_FROM_ALL)
+    add_executable(${name} EXCLUDE_FROM_ALL ${ARG_UNPARSED_ARGUMENTS})
+  else()
+    add_executable(${name} ${ARG_UNPARSED_ARGUMENTS})
+  endif()
+
   llvm_update_compile_flags(${name})
 
   if (ARG_DEPENDS)

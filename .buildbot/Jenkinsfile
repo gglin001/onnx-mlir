@@ -24,7 +24,7 @@ def call() {
 
     agent {
       node {
-        label 'master'
+        label 'main'
         /* Each pull request has its own build directory so concurrent builds
          * of different pull requests will not trash each other.
          */
@@ -230,7 +230,7 @@ def post_build_status(event, state) {
      * string while for replaceAll the 1st string is a regex.
      */
     def MAXLEN   = 24
-    def title    = "${GITHUB_PR_COMMIT_MESSAGE}".replace('\n', ' ').replace('\'', '').replace('"', '')
+    def title    = "${GITHUB_PR_COMMIT_MESSAGE}".replace('\n', ' ').replace('\r', ' ').replace('\'', '').replace('"', '')
     def phrase   = (event == 'issue_comment') ?
                    "${GITHUB_PR_PHRASE}" : "${GITHUB_PR_ACTION}"
     def desc     = ("${GITHUB_PR_ACTION}" == 'push' ?
@@ -244,7 +244,7 @@ def post_build_status(event, state) {
         "at ${JENKINS_START_TIME}" : "after ${currentBuild.durationString.replace(' and counting','')}"
     def status   = (state == 'aborted') ? 'failure' : state
 
-    /* If the action is "push", it's for merging into master. The GitHub page
+    /* If the action is "push", it's for merging into main. The GitHub page
      * for the pull request is already closed and commit status is no longer
      * updated. So we post the build status as a comment.
      */

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //===- ONNXConstProp.td - Rewriting for Constant Propagation in ONNX Ops -*- tablegen -===//
 //
 // Copyright 2019-2020 The IBM Research Authors.
@@ -13,7 +15,7 @@
 #define ONNX_CONSTPROP
 
 #ifndef OP_BASE
-include "src/Dialect/ONNX/ONNXOps.td"
+include "src/Dialect/ONNX/ONNX.td"
 #endif // OP_BASE
 
 //===----------------------------------------------------------------------===//

@@ -4,7 +4,7 @@
 
 //===----------------Expand.cpp - Lowering Expand Op----------------------=== //
 //
-// Copyright 2020 The IBM Research Authors.
+// Copyright 2020-2022 The IBM Research Authors.
 //
 // =============================================================================
 //
@@ -18,9 +18,12 @@
 
 using namespace mlir;
 
+namespace onnx_mlir {
+
 struct ONNXExpandOpLowering : public ConversionPattern {
-  ONNXExpandOpLowering(MLIRContext *ctx)
-      : ConversionPattern(mlir::ONNXExpandOp::getOperationName(), 1, ctx) {}
+  ONNXExpandOpLowering(TypeConverter &typeConverter, MLIRContext *ctx)
+      : ConversionPattern(
+            typeConverter, mlir::ONNXExpandOp::getOperationName(), 1, ctx) {}
 
   LogicalResult matchAndRewrite(Operation *op, ArrayRef<Value> operands,
       ConversionPatternRewriter &rewriter) const final {
@@ -30,8 +33,8 @@ struct ONNXExpandOpLowering : public ConversionPattern {
     Value input = operandAdaptor.input();
     Location loc = op->getLoc();
     ONNXExpandOpShapeHelper shapeHelper(&expandOp, &rewriter,
-        getDenseElementAttributeFromKrnlValue,
-        loadDenseElementArrayValueAtIndex);
+        krnl::getDenseElementAttributeFromKrnlValue,
+        krnl::loadDenseElementArrayValueAtIndex);
     LogicalResult shapecomputed = shapeHelper.computeShape(operandAdaptor);
     assert(succeeded(shapecomputed) && "Failed to compute shape");
 
@@ -39,22 +42,22 @@ struct ONNXExpandOpLowering : public ConversionPattern {
     MemRefType outputMemRefType = convertToMemRefType(*op->result_type_begin());
     int64_t outputRank = outputMemRefType.getRank();
     Value alloc = insertAllocAndDeallocSimple(
-        rewriter, op, outputMemRefType, loc, shapeHelper.dimsForOutput(0));
+        rewriter, op, outputMemRefType, loc, shapeHelper.dimsForOutput());
 
     // Iterate over the output values.
     KrnlBuilder createKrnl(rewriter, loc);
     ValueRange outputLoopDef = createKrnl.defineLoops(outputRank);
-    LiteralIndexExpr zero(0);
-    SmallVector<IndexExpr, 4> lbs(outputRank, zero);
+    LiteralIndexExpr zeroIE(0);
+    SmallVector<IndexExpr, 4> lbs(outputRank, zeroIE);
     createKrnl.iterateIE(outputLoopDef, outputLoopDef, lbs,
-        shapeHelper.dimsForOutput(0),
+        shapeHelper.dimsForOutput(),
         [&](KrnlBuilder &createKrnl, ValueRange outputLoopInd) {
           IndexExprScope outputScope(createKrnl, shapeHelper.scope);
           SmallVector<IndexExpr, 4> outputLoopIndices, lhsAccessExprs;
           getIndexExprList<DimIndexExpr>(outputLoopInd, outputLoopIndices);
           LogicalResult res = shapeHelper.GetAccessExprs(
               input, 0, outputLoopIndices, lhsAccessExprs);
-          assert(succeeded(res));
+          assert(succeeded(res) && "Could not compute access indices");
           Value val = createKrnl.loadIE(input, lhsAccessExprs);
           createKrnl.store(val, alloc, outputLoopInd);
         });
@@ -64,7 +67,9 @@ struct ONNXExpandOpLowering : public ConversionPattern {
   }
 };
 
-void populateLoweringONNXExpandOpPattern(
-    RewritePatternSet &patterns, MLIRContext *ctx) {
-  patterns.insert<ONNXExpandOpLowering>(ctx);
+void populateLoweringONNXExpandOpPattern(RewritePatternSet &patterns,
+    TypeConverter &typeConverter, MLIRContext *ctx) {
+  patterns.insert<ONNXExpandOpLowering>(typeConverter, ctx);
 }
+
+} // namespace onnx_mlir

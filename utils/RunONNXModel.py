@@ -20,6 +20,10 @@ parser.add_argument('--print_input',
 parser.add_argument('--print_output',
                     action='store_true',
                     help="Print out inference outputs produced by onnx-mlir")
+parser.add_argument('--save_onnx',
+                       metavar='PATH',
+                       type=str,
+                       help="File path to save the onnx model")
 lib_group.add_argument('--save_so',
                        metavar='PATH',
                        type=str,
@@ -55,6 +59,9 @@ parser.add_argument('--verify',
                     choices=['onnxruntime', 'ref'],
                     help="Verify the output by using onnxruntime or reference"
                     " inputs/outputs. By default, no verification")
+parser.add_argument('--verify_all_ops',
+                    action='store_true',
+                    help="Verify all operation outputs when using onnxruntime.")
 parser.add_argument(
     '--compile_using_input_shape',
     action='store_true',
@@ -75,7 +82,7 @@ if (not os.environ.get('ONNX_MLIR_HOME', None)):
         "Environment variable ONNX_MLIR_HOME is not set, please set it to the path to "
         "the HOME directory for onnx-mlir. The HOME directory for onnx-mlir refers to "
         "the parent folder containing the bin, lib, etc sub-folders in which ONNX-MLIR "
-        "executables and libraries can be found.")
+        "executables and libraries can be found, typically `onnx-mlir/build/Debug`")
 
 VERBOSE = os.environ.get('VERBOSE', False)
 
@@ -95,6 +102,7 @@ try:
 except ImportError:
     raise ImportError(
         "Looks like you did not build the PyRuntime target, build it by running `make PyRuntime`."
+        "You may need to set ONNX_MLIR_HOME to `onnx-mlir/build/Debug` since `make PyRuntime` outputs to `build/Debug` by default"
     )
 
 
@@ -112,15 +120,11 @@ def execute_commands(cmds):
 
 
 def extend_model_output(model, intermediate_outputs):
-    # onnx-mlir doesn't care about manually specified output types & shapes.
-    DUMMY_TENSOR_TYPE = onnx.TensorProto.FLOAT
-
     while (len(model.graph.output)):
         model.graph.output.pop()
 
     for output_name in intermediate_outputs:
-        output_value_info = onnx.helper.make_tensor_value_info(
-            output_name, DUMMY_TENSOR_TYPE, None)
+        output_value_info = onnx.helper.make_empty_tensor_value_info(output_name)
         model.graph.output.extend([output_value_info])
     return model
 
@@ -227,11 +231,17 @@ def main():
     # If using onnxruntime for verification, we can verify every operation output.
     output_names = [o.name for o in model.graph.output]
     output_names = list(OrderedDict.fromkeys(output_names))
-    if (args.verify and args.verify == "onnxruntime"):
+    if (args.verify and args.verify == "onnxruntime" and args.verify_all_ops):
+        print("Extending the onnx model to check every node output ...\n")
         output_names = sum([[n for n in node.output if n != '']
                             for node in model.graph.node], [])
         output_names = list(OrderedDict.fromkeys(output_names))
         model = extend_model_output(model, output_names)
+
+    # Save the generated .so file of the model if required.
+    if (args.save_onnx):
+        print("Saving the onnx model to ", args.save_onnx, "\n")
+        onnx.save(model, args.save_onnx)
 
     # Compile, run, and verify.
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -293,10 +303,15 @@ def main():
                 execute_commands('rsync -ar {} {}'.format(
                     shared_lib_path, args.save_so))
 
+        # Use the generated shared library to create an execution session.
+        print("Loading the compiled model ...")
+        start = time.perf_counter()
+        sess = ExecutionSession(shared_lib_path)
+        end = time.perf_counter()
+        print("  took ", end - start, " seconds.\n")
+
         print("Running inference ...")
         start = time.perf_counter()
-        # Use the generated shared library to create an execution session.
-        sess = ExecutionSession(shared_lib_path, "run_main_graph")
         outs = sess.run(inputs)
         end = time.perf_counter()
         print("  took ", end - start, " seconds.\n")

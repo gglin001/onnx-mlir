@@ -4,7 +4,7 @@
 
 //===--------------- Conv.cpp - Lowering Convolution Op -------------------===//
 //
-// Copyright 2019 The IBM Research Authors.
+// Copyright 2019-2022 The IBM Research Authors.
 //
 // =============================================================================
 //
@@ -17,9 +17,12 @@
 
 using namespace mlir;
 
+namespace onnx_mlir {
+
 struct ONNXConvOpLowering : public ConversionPattern {
-  ONNXConvOpLowering(MLIRContext *ctx)
-      : ConversionPattern(mlir::ONNXConvOp::getOperationName(), 1, ctx) {}
+  ONNXConvOpLowering(TypeConverter &typeConverter, MLIRContext *ctx)
+      : ConversionPattern(
+            typeConverter, mlir::ONNXConvOp::getOperationName(), 1, ctx) {}
 
   void convUnoptimized(ConversionPatternRewriter &rewriter,
       IndexExprScope *topScope, ONNXConvOp &convOp,
@@ -209,15 +212,15 @@ struct ONNXConvOpLowering : public ConversionPattern {
 
     // Get shape.
     ONNXConvOpShapeHelper shapeHelper(&convOp, &rewriter,
-        getDenseElementAttributeFromKrnlValue,
-        loadDenseElementArrayValueAtIndex);
+        krnl::getDenseElementAttributeFromKrnlValue,
+        krnl::loadDenseElementArrayValueAtIndex);
     auto shapecomputed = shapeHelper.computeShape(operandAdaptor);
-    assert(succeeded(shapecomputed));
+    assert(succeeded(shapecomputed) && "Could not compute output shape");
 
     // Insert an allocation and deallocation for the result of this operation.
     MemRefType memRefType = convertToMemRefType(*op->result_type_begin());
     Value alloc = insertAllocAndDeallocSimple(
-        rewriter, op, memRefType, loc, shapeHelper.dimsForOutput(0));
+        rewriter, op, memRefType, loc, shapeHelper.dimsForOutput());
 
     convUnoptimized(rewriter, shapeHelper.scope, convOp, operandAdaptor,
         shapeHelper, memRefType, alloc);
@@ -227,7 +230,9 @@ struct ONNXConvOpLowering : public ConversionPattern {
   }
 };
 
-void populateLoweringONNXConvOpPattern(
-    RewritePatternSet &patterns, MLIRContext *ctx) {
-  patterns.insert<ONNXConvOpLowering>(ctx);
+void populateLoweringONNXConvOpPattern(RewritePatternSet &patterns,
+    TypeConverter &typeConverter, MLIRContext *ctx) {
+  patterns.insert<ONNXConvOpLowering>(typeConverter, ctx);
 }
+
+} // namespace onnx_mlir

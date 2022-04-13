@@ -4,7 +4,7 @@
 
 //===--------------- Squeeze.cpp - Lowering Squeeze Op --------------------===//
 //
-// Copyright 2019 The IBM Research Authors.
+// Copyright 2019-2022 The IBM Research Authors.
 //
 // =============================================================================
 //
@@ -17,6 +17,8 @@
 
 using namespace mlir;
 
+namespace onnx_mlir {
+
 template <typename Adaptor, typename Op, typename ShapeHelper>
 LogicalResult ONNXSqueezeOpLoweringCommon(Operation *op,
     ArrayRef<Value> operands, ConversionPatternRewriter &rewriter) {
@@ -28,20 +30,22 @@ LogicalResult ONNXSqueezeOpLoweringCommon(Operation *op,
   Value data = operandAdaptor.data();
 
   ShapeHelper shapeHelper(&squeezeOp, &rewriter,
-      getDenseElementAttributeFromKrnlValue, loadDenseElementArrayValueAtIndex);
+      krnl::getDenseElementAttributeFromKrnlValue,
+      krnl::loadDenseElementArrayValueAtIndex);
   auto shapecomputed = shapeHelper.computeShape(operandAdaptor);
-  assert(succeeded(shapecomputed));
+  assert(succeeded(shapecomputed) && "Could not compute output shape");
 
   // Lower to ReinterpretCastOp so that the data is never copied or modified.
   Value newView = emitMemRefReinterpretCastOp(
-      rewriter, loc, data, memRefType, shapeHelper.dimsForOutput(0));
+      rewriter, loc, data, memRefType, shapeHelper.dimsForOutput());
   rewriter.replaceOp(op, newView);
   return success();
 }
 
 struct ONNXSqueezeOpLowering : public ConversionPattern {
-  ONNXSqueezeOpLowering(MLIRContext *ctx)
-      : ConversionPattern(mlir::ONNXSqueezeOp::getOperationName(), 1, ctx) {}
+  ONNXSqueezeOpLowering(TypeConverter &typeConverter, MLIRContext *ctx)
+      : ConversionPattern(
+            typeConverter, mlir::ONNXSqueezeOp::getOperationName(), 1, ctx) {}
 
   LogicalResult matchAndRewrite(Operation *op, ArrayRef<Value> operands,
       ConversionPatternRewriter &rewriter) const final {
@@ -51,8 +55,9 @@ struct ONNXSqueezeOpLowering : public ConversionPattern {
 };
 
 struct ONNXSqueezeV11OpLowering : public ConversionPattern {
-  ONNXSqueezeV11OpLowering(MLIRContext *ctx)
-      : ConversionPattern(mlir::ONNXSqueezeV11Op::getOperationName(), 1, ctx) {}
+  ONNXSqueezeV11OpLowering(TypeConverter &typeConverter, MLIRContext *ctx)
+      : ConversionPattern(typeConverter,
+            mlir::ONNXSqueezeV11Op::getOperationName(), 1, ctx) {}
 
   LogicalResult matchAndRewrite(Operation *op, ArrayRef<Value> operands,
       ConversionPatternRewriter &rewriter) const final {
@@ -61,12 +66,14 @@ struct ONNXSqueezeV11OpLowering : public ConversionPattern {
   }
 };
 
-void populateLoweringONNXSqueezeOpPattern(
-    RewritePatternSet &patterns, MLIRContext *ctx) {
-  patterns.insert<ONNXSqueezeOpLowering>(ctx);
+void populateLoweringONNXSqueezeOpPattern(RewritePatternSet &patterns,
+    TypeConverter &typeConverter, MLIRContext *ctx) {
+  patterns.insert<ONNXSqueezeOpLowering>(typeConverter, ctx);
 }
 
-void populateLoweringONNXSqueezeV11OpPattern(
-    RewritePatternSet &patterns, MLIRContext *ctx) {
-  patterns.insert<ONNXSqueezeV11OpLowering>(ctx);
+void populateLoweringONNXSqueezeV11OpPattern(RewritePatternSet &patterns,
+    TypeConverter &typeConverter, MLIRContext *ctx) {
+  patterns.insert<ONNXSqueezeV11OpLowering>(typeConverter, ctx);
 }
+
+} // namespace onnx_mlir

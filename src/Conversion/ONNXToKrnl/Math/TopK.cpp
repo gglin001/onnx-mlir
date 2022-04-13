@@ -4,7 +4,7 @@
 
 //===----------------------- TopK.cpp - TopK Op ---------------------------===//
 //
-// Copyright 2021 The IBM Research Authors.
+// Copyright 2021-2022 The IBM Research Authors.
 //
 // =============================================================================
 //
@@ -17,9 +17,12 @@
 
 using namespace mlir;
 
+namespace onnx_mlir {
+
 struct ONNXTopKOpLowering : public ConversionPattern {
-  ONNXTopKOpLowering(MLIRContext *ctx)
-      : ConversionPattern(mlir::ONNXTopKOp::getOperationName(), 1, ctx) {}
+  ONNXTopKOpLowering(TypeConverter &typeConverter, MLIRContext *ctx)
+      : ConversionPattern(
+            typeConverter, mlir::ONNXTopKOp::getOperationName(), 1, ctx) {}
   LogicalResult matchAndRewrite(Operation *op, ArrayRef<Value> operands,
       ConversionPatternRewriter &rewriter) const final {
     Location loc = op->getLoc();
@@ -49,9 +52,9 @@ struct ONNXTopKOpLowering : public ConversionPattern {
     // Compute the output's dimension sizes.
     ONNXTopKOpShapeHelper shapeHelper(&topkOp, &rewriter,
         getDenseElementAttributeFromConstantValue,
-        loadDenseElementArrayValueAtIndex);
+        krnl::loadDenseElementArrayValueAtIndex);
     auto shapeComputed = shapeHelper.computeShape(operandAdaptor);
-    assert(succeeded(shapeComputed));
+    assert(succeeded(shapeComputed) && "Could not compute output shape");
     auto resDims = shapeHelper.dimsForOutput();
 
     // Insert an allocation and deallocation for the results of this operation.
@@ -89,7 +92,9 @@ struct ONNXTopKOpLowering : public ConversionPattern {
   }
 };
 
-void populateLoweringONNXTopKOpPattern(
-    RewritePatternSet &patterns, MLIRContext *ctx) {
-  patterns.insert<ONNXTopKOpLowering>(ctx);
+void populateLoweringONNXTopKOpPattern(RewritePatternSet &patterns,
+    TypeConverter &typeConverter, MLIRContext *ctx) {
+  patterns.insert<ONNXTopKOpLowering>(typeConverter, ctx);
 }
+
+} // namespace onnx_mlir

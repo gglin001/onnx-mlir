@@ -4,7 +4,7 @@
 
 //===----------------- Gemm.cpp - Lowering Gemm Op ------------------------===//
 //
-// Copyright 2019 The IBM Research Authors.
+// Copyright 2019-2022 The IBM Research Authors.
 //
 // =============================================================================
 //
@@ -12,7 +12,10 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "llvm/Support/Debug.h"
+
 #include "src/Conversion/ONNXToKrnl/ONNXToKrnlCommon.hpp"
+#include "src/Dialect/Krnl/DialectBuilder.hpp"
 #include "src/Dialect/Krnl/KrnlHelper.hpp"
 #include "src/Dialect/ONNX/ShapeInference/ONNXShapeHelper.hpp"
 
@@ -26,10 +29,16 @@ static constexpr int BUFFER_ALIGN = 128;
 
 using namespace mlir;
 
+namespace onnx_mlir {
+
 template <typename GemmOp>
 struct ONNXGemmOpLowering : public ConversionPattern {
-  ONNXGemmOpLowering(MLIRContext *ctx)
-      : ConversionPattern(GemmOp::getOperationName(), 1, ctx) {}
+  ONNXGemmOpLowering(
+      TypeConverter &typeConverter, MLIRContext *ctx, bool enableTiling)
+      : ConversionPattern(typeConverter, GemmOp::getOperationName(), 1, ctx),
+        enableTiling(enableTiling) {}
+
+  bool enableTiling;
 
   void genericGemm(ONNXGemmOp &gemmOp, ONNXGemmOpAdaptor &operandAdaptor,
       Type elementType, ONNXGemmOpShapeHelper &shapeHelper, Value alloc,
@@ -38,26 +47,31 @@ struct ONNXGemmOpLowering : public ConversionPattern {
     // R is result (alloc).
     Value A(operandAdaptor.A()), B(operandAdaptor.B()), R(alloc);
 
-    // Outer loops.
+    // Create all the loops at once (outerloops followed by inner loop).
     KrnlBuilder createKrnl(rewriter, loc);
-    ValueRange outerLoops = createKrnl.defineLoops(2);
-    SmallVector<IndexExpr, 0> outerLbs(2, LiteralIndexExpr(0));
-    createKrnl.iterateIE(outerLoops, outerLoops, outerLbs,
-        shapeHelper.dimsForOutput(0),
+    ValueRange loopDef = createKrnl.defineLoops(3);
+    ValueRange outerLoopDef{loopDef[0], loopDef[1]};
+    ValueRange innerLoopDef{loopDef[2]};
+    SmallVector<IndexExpr, 3> loopLbs(3, LiteralIndexExpr(0));
+    IndexExpr outerUb0 = shapeHelper.dimsForOutput()[0];
+    IndexExpr outerUb1 = shapeHelper.dimsForOutput()[1];
+    IndexExpr innerUb = shapeHelper.aDims[1];
+    SmallVector<IndexExpr, 3> loopUbs{outerUb0, outerUb1, innerUb};
+    // Outer loops.
+    createKrnl.iterateIE(loopDef, outerLoopDef, loopLbs, loopUbs,
         [&](KrnlBuilder &createKrnl, ValueRange outerIndices) {
           // Create temp and set to zero, single scalar, no need for default
           // alignment.
-          MemRefBuilder createMemRef(createKrnl);
-          MathBuilder createMath(createKrnl);
-          Value red = createMemRef.alloca(MemRefType::get({}, elementType));
+          MultiDialectBuilder<KrnlBuilder, MemRefBuilder, MathBuilder> create(
+              createKrnl);
+          Value red = create.mem.alloca(MemRefType::get({}, elementType));
           createKrnl.store(zeroVal, red);
-          // Inner loop
-          ValueRange innerLoop = createKrnl.defineLoops(1);
-          Value innerLb = createMath.constantIndex(0);
-          Value innerUb = shapeHelper.aDims[1].getValue();
-          createKrnl.iterate(innerLoop, innerLoop, {innerLb}, {innerUb},
+          // Inner loop.
+          create.krnl.iterate({}, innerLoopDef, {}, {},
               [&](KrnlBuilder &createKrnl, ValueRange innerIndex) {
                 Value i(outerIndices[0]), j(outerIndices[1]), k(innerIndex[0]);
+                MultiDialectBuilder<KrnlBuilder, MathBuilder> create(
+                    createKrnl);
                 // Handle transposed accesses.
                 SmallVector<Value, 2> aAccess, bAccess;
                 if (gemmOp.transA() != 0)
@@ -69,17 +83,16 @@ struct ONNXGemmOpLowering : public ConversionPattern {
                 else
                   bAccess = {k, j};
                 // Perform the reduction by adding a*b to reduction.
-                MathBuilder createMath(createKrnl);
-                Value aVal = createKrnl.load(A, aAccess);
-                Value bVal = createKrnl.load(B, bAccess);
-                Value tmp = createMath.mul(aVal, bVal);
-                Value rVal = createKrnl.load(red);
-                createKrnl.store(createMath.add(tmp, rVal), red);
+                Value aVal = create.krnl.load(A, aAccess);
+                Value bVal = create.krnl.load(B, bAccess);
+                Value tmp = create.math.mul(aVal, bVal);
+                Value rVal = create.krnl.load(red);
+                create.krnl.store(create.math.add(tmp, rVal), red);
               });
           // Handle alpha/beta coefficients.
           // new scope
-          IndexExprScope innerScope(createKrnl, shapeHelper.scope);
-          Value res = createMath.mul(alphaVal, createKrnl.load(red));
+          IndexExprScope innerScope(create.krnl, shapeHelper.scope);
+          Value res = create.math.mul(alphaVal, createKrnl.load(red));
           if (shapeHelper.hasBias) {
             SmallVector<Value, 2> cAccess;
             for (int x = 2 - shapeHelper.cRank; x < 2; ++x) {
@@ -89,10 +102,10 @@ struct ONNXGemmOpLowering : public ConversionPattern {
                   IndexExpr::select(dim > 1, DimIndexExpr(outerIndices[x]), 0)
                       .getValue());
             }
-            Value c = createKrnl.load(operandAdaptor.C(), cAccess);
-            res = createMath.add(res, createMath.mul(betaVal, c));
+            Value c = create.krnl.load(operandAdaptor.C(), cAccess);
+            res = create.math.add(res, create.math.mul(betaVal, c));
           }
-          createKrnl.store(res, R, outerIndices);
+          create.krnl.store(res, R, outerIndices);
         });
   }
 
@@ -109,8 +122,8 @@ struct ONNXGemmOpLowering : public ConversionPattern {
     IndexExpr I = shapeHelper.dimsForOutput()[0];
     IndexExpr J = shapeHelper.dimsForOutput()[1];
     IndexExpr K = shapeHelper.aDims[1]; // aDims are already transposed.
-    LiteralIndexExpr zero(0);
-    Value z = zero.getValue();
+    LiteralIndexExpr zeroIE(0);
+    Value z = zeroIE.getValue();
 
     // Initialize alloc/R to zero.
     KrnlBuilder createKrnl(rewriter, loc);
@@ -185,11 +198,11 @@ struct ONNXGemmOpLowering : public ConversionPattern {
       createKrnl.permute({ii1, ii2, ii3, jj1, jj2, jj3, kk1, kk2},
           {/*i*/ 0, 4, 5, /*j*/ 1, 3, 6, /*k*/ 2, 7});
       // Compute: A[i, k] * b[k, j] -> R[i, j])
-      createKrnl.iterateIE({ii, jj}, {ii1, jj1}, {zero, zero}, {I, J},
-          [&](KrnlBuilder &createKrnl, ValueRange i1_j1_indices) {
+      createKrnl.iterateIE({ii, jj, kk}, {ii1, jj1}, {zeroIE, zeroIE, zeroIE},
+          {I, J, K}, [&](KrnlBuilder &createKrnl, ValueRange i1_j1_indices) {
             Value i1(i1_j1_indices[0]), j1(i1_j1_indices[1]);
             createKrnl.copyToBuffer(rBuff, R, {i1, j1}, zeroVal, false);
-            createKrnl.iterateIE({kk}, {kk1}, {zero}, {K},
+            createKrnl.iterateIE({}, {kk1}, {}, {},
                 [&](KrnlBuilder &createKrnl, ValueRange k1_index) {
                   Value k1(k1_index[0]);
                   if (aTrans)
@@ -220,17 +233,25 @@ struct ONNXGemmOpLowering : public ConversionPattern {
     } else {
       // Does not have to tile the result.
       // (cache) jj1 kk1, ii1, (reg) jj2, ii2, (matmul) ii3, jj3, kk3
+      // Krnl Rule: put all the values in the permute, including the ones that
+      // are not iterated over explicitly. All of the same derived (tiled)
+      // variable must be consecutive, and different original variables must be
+      // ordered in the same permute order. Js must be first as the outermost
+      // level is a j, then all the Ks, then all the Is.
       createKrnl.permute({jj1, jj2, jj3, kk1, kk2, ii1, ii2, ii3},
           {/*j*/ 0, 3, 5, /*k*/ 1, 6, /*i*/ 2, 4, 7});
       // Compute: A[i, k] * b[k, j] -> R[i, j])
-      createKrnl.iterateIE({jj, kk}, {jj1, kk1}, {zero, zero}, {J, K},
-          [&](KrnlBuilder &createKrnl, ValueRange j1_k1_indices) {
+      // Krnl Rule: must put all the iter bounds at once, but can only put the
+      // "not currently used ones" like ii here last. Gave an error when ii was
+      // listed first.
+      createKrnl.iterateIE({jj, kk, ii}, {jj1, kk1}, {zeroIE, zeroIE, zeroIE},
+          {J, K, I}, [&](KrnlBuilder &createKrnl, ValueRange j1_k1_indices) {
             Value j1(j1_k1_indices[0]), k1(j1_k1_indices[1]);
             if (bTrans)
               createKrnl.copyToBuffer(bBuff, B, {j1, k1}, zeroVal, true);
             else
               createKrnl.copyToBuffer(bBuff, B, {k1, j1}, zeroVal, false);
-            createKrnl.iterateIE({ii}, {ii1}, {zero}, {I},
+            createKrnl.iterateIE({}, {ii1}, {}, {},
                 [&](KrnlBuilder &createKrnl, ValueRange i1_index) {
                   Value i1(i1_index[0]);
                   if (aTrans)
@@ -261,7 +282,7 @@ struct ONNXGemmOpLowering : public ConversionPattern {
       return;
     }
     ValueRange outerLoops = createKrnl.defineLoops(2);
-    createKrnl.iterateIE(outerLoops, outerLoops, {zero, zero}, {I, J},
+    createKrnl.iterateIE(outerLoops, outerLoops, {zeroIE, zeroIE}, {I, J},
         [&](KrnlBuilder &createKrnl, ValueRange outerIndices) {
           // Handle alpha/beta coefficients.
           Value res = createKrnl.load(R, outerIndices);
@@ -295,16 +316,16 @@ struct ONNXGemmOpLowering : public ConversionPattern {
     ONNXGemmOp gemmOp = llvm::cast<ONNXGemmOp>(op);
     Location loc = op->getLoc();
     ONNXGemmOpShapeHelper shapeHelper(&gemmOp, &rewriter,
-        getDenseElementAttributeFromKrnlValue,
-        loadDenseElementArrayValueAtIndex);
+        krnl::getDenseElementAttributeFromKrnlValue,
+        krnl::loadDenseElementArrayValueAtIndex);
     auto shapecomputed = shapeHelper.computeShape(operandAdaptor);
-    assert(succeeded(shapecomputed));
+    assert(succeeded(shapecomputed) && "Could not compute output shape");
 
     // Insert an allocation and deallocation for the output of this operation.
     MemRefType outputMemRefType = convertToMemRefType(*op->result_type_begin());
     Type elementType = outputMemRefType.getElementType();
     Value alloc = insertAllocAndDeallocSimple(rewriter, op, outputMemRefType,
-        loc, shapeHelper.dimsForOutput(0), (int64_t)BUFFER_ALIGN);
+        loc, shapeHelper.dimsForOutput(), (int64_t)BUFFER_ALIGN);
 
     // Get the constants: zero, alpha,and beta.
     float alphaLit = gemmOp.alpha().convertToFloat();
@@ -347,19 +368,22 @@ struct ONNXGemmOpLowering : public ConversionPattern {
       }
     });
 
-    if (DEBUG_OPTIMIZED_OFF) {
-      genericGemm(gemmOp, operandAdaptor, elementType, shapeHelper, alloc, zero,
-          alpha, beta, rewriter, loc);
-    } else {
+    if (enableTiling && !DEBUG_OPTIMIZED_OFF) {
       tiledTransposedGemm(gemmOp, operandAdaptor, elementType, shapeHelper,
           alloc, zero, alpha, beta, rewriter, loc);
+    } else {
+      genericGemm(gemmOp, operandAdaptor, elementType, shapeHelper, alloc, zero,
+          alpha, beta, rewriter, loc);
     }
     rewriter.replaceOp(op, alloc);
     return success();
   }
 };
 
-void populateLoweringONNXGemmOpPattern(
-    RewritePatternSet &patterns, MLIRContext *ctx) {
-  patterns.insert<ONNXGemmOpLowering<ONNXGemmOp>>(ctx);
+void populateLoweringONNXGemmOpPattern(RewritePatternSet &patterns,
+    TypeConverter &typeConverter, MLIRContext *ctx, bool enableTiling) {
+  patterns.insert<ONNXGemmOpLowering<ONNXGemmOp>>(
+      typeConverter, ctx, enableTiling);
 }
+
+} // namespace onnx_mlir

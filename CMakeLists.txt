@@ -5,10 +5,18 @@ cmake_minimum_required(VERSION 3.13.4)
 
 project(onnx-mlir)
 
-option(ONNX_MLIR_BUILD_TESTS "Build ONNX MLIR test executables. If OFF, just generate build targets." ON)
+option(ONNX_MLIR_BUILD_TESTS "Build ONNX-MLIR test executables. If OFF, just generate build targets." ON)
+option(ONNX_MLIR_ENABLE_WERROR "Enable warnings as errors." OFF)
 option(ONNX_MLIR_SUPPRESS_THIRD_PARTY_WARNINGS "Suppress warning in third_party code." ON)
 
+# On systems that still have legacy lib64 directories (e.g., rhel/fedora,
+# etc.), by default some components (e.g., cmake) install into lib while
+# others (e.g., python) install into lib64.
+# This causes trouble when we try to figure out the runtime directory in
+# CompilerUtils.cpp::getRuntimeDir(). So we explicitly set CMAKE_INSTALL_LIBDIR
+# to install into lib on all systems so we don't have to deal with lib64.
 set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_INSTALL_LIBDIR lib)
 
 if (NOT CMAKE_BUILD_TYPE)
   message(STATUS "No build type selected, default to Debug")
@@ -28,6 +36,20 @@ if (MSVC)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -wd4125")
 endif()
 
+# Define preprocessor for accelerators.
+set(NNPA_ENABLED 0)
+if (ACCELERATORS_TO_BUILD)
+  foreach(t ${ACCELERATORS_TO_BUILD})
+    if (${t} STREQUAL "NNPA")
+      set(NNPA_ENABLED 1)
+    endif()
+  endforeach(t)
+endif(ACCELERATORS_TO_BUILD)
+
+# Enable warnings as errors
+# Leverage the imported LLVM_ENABLE_WERROR for compiler logic
+set(LLVM_ENABLE_WERROR ${ONNX_MLIR_ENABLE_WERROR})
+
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/$<CONFIG>/lib)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/$<CONFIG>/lib)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/$<CONFIG>/bin)
@@ -39,6 +61,7 @@ set(ONNX_MLIR_LIBRARY_PATH ${CMAKE_LIBRARY_OUTPUT_DIRECTORY})
 set(ONNX_MLIR_RUNTIME_PATH ${CMAKE_RUNTIME_OUTPUT_DIRECTORY})
 
 include(CTest)
+include(ExternalProject)
 include(MLIR.cmake)
 
 # MLIR.cmake calls find_package(MLIR) which sets LLVM_MINIMUM_PYTHON_VERSION
@@ -48,6 +71,7 @@ if (WIN32)
   # installed on the machine.
   set(Python3_FIND_REGISTRY NEVER)
 endif()
+
 find_package(Python3 ${LLVM_MINIMUM_PYTHON_VERSION} REQUIRED COMPONENTS Interpreter Development)
 
 # Don't require AWT to allow headless JDK to reduce docker image size
@@ -112,9 +136,17 @@ if (ONNX_MLIR_SUPPRESS_THIRD_PARTY_WARNINGS)
   endif()
 endif()
 
+# Add third party subdirectories and define options appropriate to run their cmakes.
+set(pybind11_FIND_QUIETLY ON)
+set(BENCHMARK_USE_BUNDLED_GTEST OFF)
+set(BENCHMARK_ENABLE_GTEST_TESTS OFF)
+set(BENCHMARK_ENABLE_TESTING OFF)
 add_subdirectory(third_party/onnx)
 add_subdirectory(third_party/pybind11)
 add_subdirectory(third_party/rapidcheck)
+if (NOT TARGET benchmark)
+  add_subdirectory(third_party/benchmark)
+endif()
 
 # Ensure warnings are reported for onnx-mlir code.
 if (ONNX_MLIR_SUPPRESS_THIRD_PARTY_WARNINGS)
@@ -129,3 +161,4 @@ add_subdirectory(include)
 add_subdirectory(src)
 add_subdirectory(docs)
 add_subdirectory(test)
+add_subdirectory(version)

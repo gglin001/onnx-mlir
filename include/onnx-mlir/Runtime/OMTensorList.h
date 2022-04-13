@@ -40,7 +40,30 @@ extern "C" {
  * @return pointer to the OMTensorList created, NULL if creation failed.
  *
  */
-OMTensorList *omTensorListCreate(OMTensor **tensors, int64_t n);
+OM_EXTERNAL_VISIBILITY OMTensorList *omTensorListCreate(
+    OMTensor **tensors, int64_t n);
+
+/**
+ * \brief OMTensorList creator with tensor array pointers ownership
+ *
+ * Create an OMTensorList with specified OMTensor array. The array of pointers
+ * to OMTensor pointers is used without copying, so caller should not free the
+ * `tensors` ptr.
+ *
+ * This call allows the user to specify whether OMTensorList owns the tensor
+ * array of pointers, which subsequently determines whether the memory space
+ * underlying the pointers will be freed or not when OMTensorList gets
+ * destroyed.
+ *
+ * @param tensors array of pointers to OMTensor
+ * @param n number of elements in tensors array
+ * @param owning whether OMTensorList owns the tensor array pointers, if set
+ * to true, OMTensorList will release memory for the pointers upon destruction.
+ * @return pointer to the OMTensorList created, NULL if creation failed.
+ *
+ */
+OM_EXTERNAL_VISIBILITY OMTensorList *omTensorListCreateWithOwnership(
+    OMTensor **tensors, int64_t n, int64_t owning);
 
 /**
  * \brief OMTensorList destroyer
@@ -48,10 +71,11 @@ OMTensorList *omTensorListCreate(OMTensor **tensors, int64_t n);
  * Destroy the OMTensorList struct recursively. That is to say, both the
  * ptr to the OMTensor pointers AND the OMTensor pointers are freed.
  *
- * @param list pointer to the OMTensorList to be destroyed
+ * @param list pointer to the OMTensorList to be destroyed.  The function
+ * simply returns when pointer is null.
  *
  */
-void omTensorListDestroy(OMTensorList *list);
+OM_EXTERNAL_VISIBILITY void omTensorListDestroy(OMTensorList *list);
 
 /**
  * \brief OMTensorList OMTensor array getter
@@ -62,7 +86,7 @@ void omTensorListDestroy(OMTensorList *list);
  * @param list pointer to the OMTensorList
  * @return pointer to the array of OMTensor pointers.
  */
-OMTensor **omTensorListGetOmtArray(OMTensorList *list);
+OM_EXTERNAL_VISIBILITY OMTensor **omTensorListGetOmtArray(OMTensorList *list);
 
 /**
  * \brief OMTensorList size getter
@@ -71,7 +95,7 @@ OMTensor **omTensorListGetOmtArray(OMTensorList *list);
  * @param list pointer to the OMTensorList
  * @return number of elements in the OMTensor array.
  */
-int64_t omTensorListGetSize(OMTensorList *list);
+OM_EXTERNAL_VISIBILITY int64_t omTensorListGetSize(OMTensorList *list);
 
 /**
  * \brief OMTensorList OMTensor getter by index
@@ -80,7 +104,8 @@ int64_t omTensorListGetSize(OMTensorList *list);
  * @param index index of the OMTensor
  * @reutrn pointer to the OMTensor, NULL if not found.
  */
-OMTensor *omTensorListGetOmtByIndex(OMTensorList *list, int64_t index);
+OM_EXTERNAL_VISIBILITY OMTensor *omTensorListGetOmtByIndex(
+    OMTensorList *list, int64_t index);
 
 #ifdef __cplusplus
 }

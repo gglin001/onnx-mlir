@@ -4,7 +4,7 @@
 
 //===-----------------------Pad.cpp - Lowering Pad Op -------------------===//
 //
-// Copyright 2019 The IBM Research Authors.
+// Copyright 2019-2022 The IBM Research Authors.
 //
 // =============================================================================
 //
@@ -17,9 +17,12 @@
 
 using namespace mlir;
 
+namespace onnx_mlir {
+
 struct ONNXPadOpLowering : public ConversionPattern {
-  ONNXPadOpLowering(MLIRContext *ctx)
-      : ConversionPattern(mlir::ONNXPadOp::getOperationName(), 1, ctx) {}
+  ONNXPadOpLowering(TypeConverter &typeConverter, MLIRContext *ctx)
+      : ConversionPattern(
+            typeConverter, mlir::ONNXPadOp::getOperationName(), 1, ctx) {}
 
   LogicalResult matchAndRewrite(Operation *op, ArrayRef<Value> operands,
       ConversionPatternRewriter &rewriter) const final {
@@ -35,16 +38,16 @@ struct ONNXPadOpLowering : public ConversionPattern {
 
     // Shape helper.
     ONNXPadOpShapeHelper shapeHelper(&padOp, &rewriter,
-        getDenseElementAttributeFromKrnlValue,
-        loadDenseElementArrayValueAtIndex);
+        krnl::getDenseElementAttributeFromKrnlValue,
+        krnl::loadDenseElementArrayValueAtIndex);
     auto shapecomputed = shapeHelper.computeShape(operandAdaptor);
-    assert(succeeded(shapecomputed));
+    assert(succeeded(shapecomputed) && "Could not compute output shape");
 
     // Insert an allocation and deallocation for the output of this operation.
     auto resMemRefType = convertToMemRefType(*op->result_type_begin());
     auto resElementType = resMemRefType.getElementType();
     Value resMemRef = insertAllocAndDeallocSimple(
-        rewriter, op, resMemRefType, loc, shapeHelper.dimsForOutput(0));
+        rewriter, op, resMemRefType, loc, shapeHelper.dimsForOutput());
 
     // Bounds.
     MemRefBoundsIndexCapture dataBounds(data);
@@ -52,9 +55,9 @@ struct ONNXPadOpLowering : public ConversionPattern {
     uint64_t rank = dataBounds.getRank();
 
     // Literal indices.
-    LiteralIndexExpr zero(0);
-    LiteralIndexExpr one(1);
-    LiteralIndexExpr two(2);
+    LiteralIndexExpr zeroIE(0);
+    LiteralIndexExpr oneIE(1);
+    LiteralIndexExpr twoIE(2);
 
     if (padMode.equals_insensitive("constant")) {
       // 'constant' mode.
@@ -74,7 +77,7 @@ struct ONNXPadOpLowering : public ConversionPattern {
 
       // Copy values from the input to the result.
       // Iterate over the input tensor dimensions.
-      SmallVector<IndexExpr, 4> lbs(rank, zero);
+      SmallVector<IndexExpr, 4> lbs(rank, zeroIE);
       SmallVector<IndexExpr, 4> ubs;
       dataBounds.getDimList(ubs);
       ValueRange mainLoopDef = createKrnl.defineLoops(rank);
@@ -91,7 +94,7 @@ struct ONNXPadOpLowering : public ConversionPattern {
           });
     } else {
       // 'edge' and 'reflect' modes.
-      SmallVector<IndexExpr, 4> lbs(rank, zero);
+      SmallVector<IndexExpr, 4> lbs(rank, zeroIE);
       SmallVector<IndexExpr, 4> ubs;
       resBounds.getDimList(ubs);
       // Copy values from the input to the result.
@@ -106,9 +109,9 @@ struct ONNXPadOpLowering : public ConversionPattern {
               IndexExpr dim = dataBounds.getDim(i);
               if (padMode.equals_insensitive("edge")) {
                 // Before the left side of input. Use values on the left edge.
-                dataInd = dataInd.select(dataInd <= pad, zero, dataInd - pad);
+                dataInd = dataInd.select(dataInd <= pad, zeroIE, dataInd - pad);
                 // After the right side of input. Use values on the right edge.
-                dataInd = dataInd.selectOrSelf(dataInd >= dim, dim - one);
+                dataInd = dataInd.selectOrSelf(dataInd >= dim, dim - oneIE);
               }
               if (padMode.equals_insensitive("reflect")) {
                 // Before the left side of input. Reflect on the left edge.
@@ -116,7 +119,7 @@ struct ONNXPadOpLowering : public ConversionPattern {
                     dataInd.select(dataInd < pad, pad - dataInd, dataInd - pad);
                 // After the right side of input. Reflect on the right edge.
                 dataInd = dataInd.selectOrSelf(
-                    dataInd >= dim, dim - (dataInd - dim) - two);
+                    dataInd >= dim, dim - (dataInd - dim) - twoIE);
               }
               dataLoopInd.emplace_back(dataInd);
             }
@@ -132,7 +135,9 @@ struct ONNXPadOpLowering : public ConversionPattern {
   }
 };
 
-void populateLoweringONNXPadOpPattern(
-    RewritePatternSet &patterns, MLIRContext *ctx) {
-  patterns.insert<ONNXPadOpLowering>(ctx);
+void populateLoweringONNXPadOpPattern(RewritePatternSet &patterns,
+    TypeConverter &typeConverter, MLIRContext *ctx) {
+  patterns.insert<ONNXPadOpLowering>(typeConverter, ctx);
 }
+
+} // namespace onnx_mlir

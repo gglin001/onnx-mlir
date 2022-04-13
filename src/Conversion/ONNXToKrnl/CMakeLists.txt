@@ -4,6 +4,7 @@
 add_onnx_mlir_library(OMONNXToKrnl
   ConvertONNXToKrnl.cpp
   ONNXToKrnlCommon.cpp
+  PerfectHash.cpp
   ControlFlow/Loop.cpp
   ControlFlow/Scan.cpp
   Math/CumSum.cpp
@@ -14,9 +15,11 @@ add_onnx_mlir_library(OMONNXToKrnl
   Math/LRN.cpp
   Math/MatMul.cpp
   Math/RandomNormal.cpp
+  Math/RandomNormalLike.cpp
   Math/Reduction.cpp
   Math/Softmax.cpp
   Math/TopK.cpp
+  ML/CategoryMapper.cpp
   NN/Conv.cpp
   NN/Normalization.cpp
   NN/Pooling.cpp
@@ -26,6 +29,11 @@ add_onnx_mlir_library(OMONNXToKrnl
   RNN/LSTM.cpp
   RNN/RNN.cpp
   RNN/RNNBase.cpp
+  Sequence/SequenceAt.cpp
+  Sequence/SequenceEmpty.cpp
+  Sequence/SequenceErase.cpp
+  Sequence/SequenceInsert.cpp
+  Sequence/SequenceLength.cpp
   Tensor/ArgMax.cpp
   Tensor/Concat.cpp
   Tensor/Compress.cpp  
@@ -53,10 +61,11 @@ add_onnx_mlir_library(OMONNXToKrnl
   Tensor/Resize.cpp
   Tensor/ReverseSequence.cpp
   ConvertONNXToKrnl.cpp
+
   LINK_LIBS PUBLIC
+  Accelerator
   OMConstPropHelper
   OMONNXOps
   OMSupport
-  MLIRMathTransforms
   MLIRStandardOpsTransforms
   )

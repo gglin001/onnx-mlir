@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //===- ShapeInferenceInterface.td - ShapeInference Interface -*- tablegen -===//
 //
 // Copyright 2019-2020 The IBM Research Authors.
@@ -33,9 +35,11 @@ def ShapeInferenceOpInterface : OpInterface<"ShapeInference"> {
 
   let methods = [
     InterfaceMethod<"Infer and set the output shape for the current operation.",
-                    "LogicalResult", "inferShapes",
+                    "mlir::LogicalResult", "inferShapes",
                     (ins "std::function<void(mlir::Region&)>":$shapeInferenceFunc)>
   ];
+  
+  let cppNamespace = "::mlir";
 }
 
 #endif // SHAPE_INFERENCE_OP_INTERFACE

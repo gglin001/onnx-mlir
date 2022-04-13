@@ -4,7 +4,7 @@
 
 //===----------------- Softmax.cpp - Softmax Op ---------------------------===//
 //
-// Copyright 2019 The IBM Research Authors.
+// Copyright 2019-2022 The IBM Research Authors.
 //
 // =============================================================================
 //
@@ -17,6 +17,8 @@
 
 using namespace mlir;
 
+namespace onnx_mlir {
+
 static void emitInnerLoops(KrnlBuilder &createKrnl, int64_t numberOfLoops,
     SmallVectorImpl<IndexExpr> &Lbs, SmallVectorImpl<IndexExpr> &Ubs,
     ValueRange outerIndices, Value input, Value alloc, Value sumOp, Value maxOp,
@@ -27,7 +29,7 @@ static void emitInnerLoops(KrnlBuilder &createKrnl, int64_t numberOfLoops,
   ValueRange maxLoops = createKrnl.defineLoops(numberOfLoops);
   createKrnl.iterateIE(maxLoops, maxLoops, Lbs, Ubs,
       [&](KrnlBuilder &createKrnl, ValueRange maxIndices) {
-        MathBuilder createMath(createKrnl);
+        MultiDialectBuilder<KrnlBuilder, MathBuilder> create(createKrnl);
         IndexExprScope ieScope(createKrnl);
 
         // Get induction variables.
@@ -45,11 +47,11 @@ static void emitInnerLoops(KrnlBuilder &createKrnl, int64_t numberOfLoops,
             maxLoopIVs.push_back(outerIndices[i - 1]);
         }
 
-        Value max = createKrnl.load(maxOp, {});
-        Value nextMax = createKrnl.load(input, maxLoopIVs);
-        auto maxCond = createMath.sgt(max, nextMax);
-        max = createMath.select(maxCond, max, nextMax);
-        createKrnl.store(max, maxOp, ArrayRef<Value>{});
+        Value max = create.krnl.load(maxOp, {});
+        Value nextMax = create.krnl.load(input, maxLoopIVs);
+        auto maxCond = create.math.sgt(max, nextMax);
+        max = create.math.select(maxCond, max, nextMax);
+        create.krnl.store(max, maxOp, ArrayRef<Value>{});
       });
   // Load the maximum value.
   Value max = createKrnl.load(maxOp, {});
@@ -58,7 +60,7 @@ static void emitInnerLoops(KrnlBuilder &createKrnl, int64_t numberOfLoops,
   ValueRange sumLoops = createKrnl.defineLoops(numberOfLoops);
   createKrnl.iterateIE(sumLoops, sumLoops, Lbs, Ubs,
       [&](KrnlBuilder &createKrnl, ValueRange sumIndices) {
-        MathBuilder createMath(createKrnl);
+        MultiDialectBuilder<KrnlBuilder, MathBuilder> create(createKrnl);
         IndexExprScope ieScope(createKrnl);
 
         // Get induction variables.
@@ -76,15 +78,15 @@ static void emitInnerLoops(KrnlBuilder &createKrnl, int64_t numberOfLoops,
             sumLoopIVs.push_back(outerIndices[i - 1]);
         }
 
-        Value sum = createKrnl.load(sumOp, {});
-        Value next = createKrnl.load(input, sumLoopIVs);
-        Value sub = createMath.sub(next, max);
-        Value exp = createMath.exp(sub);
-        sum = createMath.add(sum, exp);
-        createKrnl.store(sum, sumOp, ArrayRef<Value>{});
+        Value sum = create.krnl.load(sumOp, {});
+        Value next = create.krnl.load(input, sumLoopIVs);
+        Value sub = create.math.sub(next, max);
+        Value exp = create.math.exp(sub);
+        sum = create.math.add(sum, exp);
+        create.krnl.store(sum, sumOp, ArrayRef<Value>{});
         // Store intermediate values in the result to avoid
         // recomputation.
-        createKrnl.store(exp, alloc, sumLoopIVs);
+        create.krnl.store(exp, alloc, sumLoopIVs);
       });
 
   // Load the sum value.
@@ -94,7 +96,7 @@ static void emitInnerLoops(KrnlBuilder &createKrnl, int64_t numberOfLoops,
   ValueRange softmaxLoops = createKrnl.defineLoops(numberOfLoops);
   createKrnl.iterateIE(softmaxLoops, softmaxLoops, Lbs, Ubs,
       [&](KrnlBuilder &createKrnl, ValueRange softmaxIndices) {
-        MathBuilder createMath(createKrnl);
+        MultiDialectBuilder<KrnlBuilder, MathBuilder> create(createKrnl);
         IndexExprScope ieScope(createKrnl);
 
         // Get induction variables.
@@ -112,9 +114,9 @@ static void emitInnerLoops(KrnlBuilder &createKrnl, int64_t numberOfLoops,
             softmaxLoopIVs.push_back(outerIndices[i - 1]);
         }
 
-        Value expLoadedVal = createKrnl.load(alloc, softmaxLoopIVs);
-        Value result = createMath.div(expLoadedVal, sum);
-        createKrnl.store(result, alloc, softmaxLoopIVs);
+        Value expLoadedVal = create.krnl.load(alloc, softmaxLoopIVs);
+        Value result = create.math.div(expLoadedVal, sum);
+        create.krnl.store(result, alloc, softmaxLoopIVs);
       });
 }
 
@@ -126,10 +128,11 @@ static void emitInstForSoftmaxBeforeV13(ConversionPatternRewriter &rewriter,
   KrnlBuilder createKrnl(rewriter, loc);
   IndexExprScope ieScope(createKrnl);
   MemRefBoundsIndexCapture inputBounds(input);
+  LiteralIndexExpr zeroIE(0);
 
   // Coerce the input into a 2-D tensor. `axis` will be the coercing
   // point. This coercing follows the softmax definition in ONNX:
-  // https://github.com/onnx/onnx/blob/master/docs/Operators.md#Softmax
+  // https://github.com/onnx/onnx/blob/main/docs/Operators.md#Softmax
   // Here, we create an outer loop and inner loop for handling the two
   // dimensions. The outer loop is only created once `axis` is not
   // zero.
@@ -141,7 +144,7 @@ static void emitInstForSoftmaxBeforeV13(ConversionPatternRewriter &rewriter,
 
     // Common information to create nested loops.
     int64_t numberOfLoops = rank;
-    SmallVector<IndexExpr, 4> Lbs(numberOfLoops, LiteralIndexExpr(0));
+    SmallVector<IndexExpr, 4> Lbs(numberOfLoops, zeroIE);
     SmallVector<IndexExpr, 4> Ubs;
     inputBounds.getDimList(Ubs);
 
@@ -150,7 +153,7 @@ static void emitInstForSoftmaxBeforeV13(ConversionPatternRewriter &rewriter,
   } else {
     // Define outer loops.
     ValueRange outerLoops = createKrnl.defineLoops(axis);
-    SmallVector<IndexExpr, 4> outerLbs(axis, LiteralIndexExpr(0));
+    SmallVector<IndexExpr, 4> outerLbs(axis, zeroIE);
     SmallVector<IndexExpr, 4> outerUbs;
     for (int i = 0; i < axis; ++i)
       outerUbs.emplace_back(inputBounds.getDim(i));
@@ -164,7 +167,7 @@ static void emitInstForSoftmaxBeforeV13(ConversionPatternRewriter &rewriter,
 
           // Common information to create inner nested loops.
           int64_t numberOfLoops = rank - axis;
-          SmallVector<IndexExpr, 4> Lbs(numberOfLoops, LiteralIndexExpr(0));
+          SmallVector<IndexExpr, 4> Lbs(numberOfLoops, zeroIE);
           SmallVector<IndexExpr, 4> Ubs;
           for (int i = axis; i < rank; ++i)
             Ubs.emplace_back(inputBounds.getDim(i));
@@ -184,6 +187,7 @@ static void emitInstForSoftmaxV13(ConversionPatternRewriter &rewriter,
   KrnlBuilder createKrnl(rewriter, loc);
   IndexExprScope ieScope(createKrnl);
   MemRefBoundsIndexCapture inputBounds(input);
+  LiteralIndexExpr zeroIE(0);
 
   // In opset version 13, The "axis" attribute indicates the dimension along
   // which Softmax will be performed. No need to coerce the dimensions after
@@ -191,7 +195,7 @@ static void emitInstForSoftmaxV13(ConversionPatternRewriter &rewriter,
 
   // Outer loops iterate over all dimensions except axis.
   ValueRange outerLoops = createKrnl.defineLoops(rank - 1);
-  SmallVector<IndexExpr, 4> outerLbs(rank - 1, LiteralIndexExpr(0));
+  SmallVector<IndexExpr, 4> outerLbs(rank - 1, zeroIE);
   SmallVector<IndexExpr, 4> outerUbs;
   for (int i = 0; i < rank; ++i)
     if (i != axis)
@@ -208,7 +212,7 @@ static void emitInstForSoftmaxV13(ConversionPatternRewriter &rewriter,
 
         // Common information to create inner nested loops for axis only.
         int64_t numberOfLoops = 1;
-        SmallVector<IndexExpr, 4> Lbs(numberOfLoops, LiteralIndexExpr(0));
+        SmallVector<IndexExpr, 4> Lbs(numberOfLoops, zeroIE);
         SmallVector<IndexExpr, 4> Ubs(numberOfLoops, inputBounds.getDim(axis));
 
         // Emit the inner loops.
@@ -218,8 +222,9 @@ static void emitInstForSoftmaxV13(ConversionPatternRewriter &rewriter,
 }
 
 struct ONNXSoftmaxOpLowering : public ConversionPattern {
-  ONNXSoftmaxOpLowering(MLIRContext *ctx)
-      : ConversionPattern(mlir::ONNXSoftmaxOp::getOperationName(), 1, ctx) {}
+  ONNXSoftmaxOpLowering(TypeConverter &typeConverter, MLIRContext *ctx)
+      : ConversionPattern(
+            typeConverter, mlir::ONNXSoftmaxOp::getOperationName(), 1, ctx) {}
   LogicalResult matchAndRewrite(Operation *op, ArrayRef<Value> operands,
       ConversionPatternRewriter &rewriter) const final {
     // softmax(x) = let max_x = max(x) in
@@ -245,21 +250,22 @@ struct ONNXSoftmaxOpLowering : public ConversionPattern {
     // Insert an allocation and deallocation for the result of this operation.
     auto elementType = memRefType.getElementType();
 
-    Value alloc;
     bool insertDealloc = checkInsertDealloc(op);
-    if (hasAllConstantDimensions(memRefType))
-      alloc = insertAllocAndDealloc(memRefType, loc, rewriter, insertDealloc);
-    else
-      alloc = insertAllocAndDealloc(
-          memRefType, loc, rewriter, insertDealloc, input);
+    Value alloc =
+        (hasAllConstantDimensions(memRefType))
+            ? insertAllocAndDealloc(memRefType, loc, rewriter, insertDealloc)
+            : insertAllocAndDealloc(
+                  memRefType, loc, rewriter, insertDealloc, input);
 
     // Insert allocations and deallocations for sum and max.
     MemRefType scalarMemRefType = MemRefType::get({}, elementType, {}, 0);
     Value sumOp = insertAllocAndDealloc(scalarMemRefType, loc, rewriter, true);
     Value maxOp = insertAllocAndDealloc(scalarMemRefType, loc, rewriter, true);
     Value zero = emitConstantOp(rewriter, loc, elementType, 0);
-    Value negInfinity = rewriter.create<arith::ConstantOp>(loc,
-        FloatAttr::get(elementType, -std::numeric_limits<float>::infinity()));
+
+    MultiDialectBuilder<MathBuilder> create(rewriter, loc);
+    Value negInfinity = create.math.constant(
+        elementType, -std::numeric_limits<float>::infinity());
 
     if (opset < 13)
       // For Softmax opset < 13, `axis` is the coerced point. All dimensions
@@ -278,7 +284,9 @@ struct ONNXSoftmaxOpLowering : public ConversionPattern {
   }
 };
 
-void populateLoweringONNXSoftmaxOpPattern(
-    RewritePatternSet &patterns, MLIRContext *ctx) {
-  patterns.insert<ONNXSoftmaxOpLowering>(ctx);
+void populateLoweringONNXSoftmaxOpPattern(RewritePatternSet &patterns,
+    TypeConverter &typeConverter, MLIRContext *ctx) {
+  patterns.insert<ONNXSoftmaxOpLowering>(typeConverter, ctx);
 }
+
+} // namespace onnx_mlir

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //===- ONNXDecompose.td - Rewriting for decomposing ONNX Ops -*- tablegen -===//
 //
 // Copyright 2019-2020 The IBM Research Authors.
@@ -13,7 +15,7 @@
 #define ONNX_DECOMPOSE
 
 #ifndef OP_BASE
-include "src/Dialect/ONNX/ONNXOps.td"
+include "src/Dialect/ONNX/ONNX.td"
 #endif // OP_BASE
 
 /// Note: The DRR definition used for defining patterns is shown below:
@@ -54,6 +56,11 @@ def GetNullStringAttr :
 def CreateUnitConstant
     : NativeCodeCall<"createUnitConstant($_builder, $_loc)">;
 
+// Create a scalar DenseElementsAttr (rank 0) from a single attribute.
+// E.g return type is tensor<f32> instead of tensor<0xf32> or tensor<1xf32>
+def createScalarDenseAttrRank0
+    : NativeCodeCall<"createScalarDenseAttr($_builder, $0)">;
+
 // Create a DenseElementsAttr from a single attribute.
 def createDenseArrayAttrFromSingleAttr
     : NativeCodeCall<"createDenseArrayAttr($_builder, $_builder.getArrayAttr($0))">;
@@ -78,6 +85,9 @@ def IsDenseONNXConstant:
 // Create an ArrayAttr from a dense ConstantOp
 def createArrayAttrFromConstantOp : NativeCodeCall<
   "createArrayAttrFromConstantOp($_builder, $0)">;
+
+def createSequenceConstructOp : NativeCodeCall<
+  "createSequenceConstructOp($_builder, $0, $1)">;
 
 //===----------------------------------------------------------------------===//
 // ONNXReduceL1Op %X = ONNXReduceSumOp (ONNXAbsOp %X)
@@ -303,6 +313,35 @@ def ResizeV11Pattern: Pat<
                     $coordinate_transformation_node, $cubic_coeff_a,
                     $exclude_outside, $exttrapolation_value, $mode,
                     $nearest_mode)
+>;
+
+// ToFix: Create type attribute for SequenceEmpty when type is not F32
+// There is a mlirTypeToOnnxType in KrnlToLLVM conversion. 
+// Need to move it into ONNXOpHelper
+def SequenceConstructPattern1: Pat<
+    (ONNXSequenceConstructOp:$res $x1),
+    (createSequenceConstructOp
+        (ONNXSequenceEmptyOp (GetNullIntegerAttr), (returnType $res)),
+        $x1)
+>;
+
+// Express Clip V6 using Clip V11.
+def ClipV6Pattern : Pat<
+  (ONNXClipV6Op $x, $maxAttr, $minAttr),
+  (ONNXClipV11Op $x, (ONNXConstantOpFromDenseAttr(createScalarDenseAttrRank0 $minAttr)),
+     (ONNXConstantOpFromDenseAttr(createScalarDenseAttrRank0 $maxAttr)))
+>;
+
+// Express Clip V11 using Clip V12.
+def ClipV11Pattern : Pat<
+  (ONNXClipV11Op $x, $min, $max),
+  (ONNXClipV12Op $x, $min, $max)
+>;
+
+// Express Clip V12 using Clip V13 (the lastest).
+def ClipV12Pattern : Pat<
+  (ONNXClipV12Op $x, $min, $max),
+  (ONNXClipOp $x, $min, $max)
 >;
 
 #endif // ONNX_DECOMPOSE

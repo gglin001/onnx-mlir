@@ -4,7 +4,7 @@
 
 //===------------ ConstantOfShape.cpp - Lowering ConstantOfShape Op -------===//
 //
-// Copyright 2019 The IBM Research Authors.
+// Copyright 2019-2022 The IBM Research Authors.
 //
 // =============================================================================
 //
@@ -16,9 +16,11 @@
 
 using namespace mlir;
 
+namespace onnx_mlir {
+
 struct ONNXConstantOfShapeOpLowering : public ConversionPattern {
-  ONNXConstantOfShapeOpLowering(MLIRContext *ctx)
-      : ConversionPattern(
+  ONNXConstantOfShapeOpLowering(TypeConverter &typeConverter, MLIRContext *ctx)
+      : ConversionPattern(typeConverter,
             mlir::ONNXConstantOfShapeOp::getOperationName(), 1, ctx) {}
 
   LogicalResult matchAndRewrite(Operation *op, ArrayRef<Value> operands,
@@ -35,29 +37,29 @@ struct ONNXConstantOfShapeOpLowering : public ConversionPattern {
     auto elementType = memRefType.getElementType();
     size_t rank = memRefType.cast<ShapedType>().getRank();
 
+    MultiDialectBuilder<KrnlBuilder, MemRefBuilder, MathBuilder> create(
+        rewriter, loc);
+
     // Allocate memory for the output.
     Value alloc;
     bool insertDealloc = checkInsertDealloc(op);
     if (hasAllConstantDimensions(memRefType))
       alloc = insertAllocAndDealloc(memRefType, loc, rewriter, insertDealloc);
     else {
-      MemRefBuilder createMemRef(rewriter, loc);
-      MathBuilder createMath(createMemRef);
-      KrnlBuilder createKrnl(createMemRef);
       SmallVector<Value, 2> allocOperands;
       // Load dimensions from the input.
       for (decltype(rank) i = 0; i < rank; ++i) {
-        Value index = createMath.constantIndex(i);
-        Value dim = createKrnl.load(operandAdaptor.input(), index);
-        Value dimIndex = createMath.castToIndex(dim);
+        Value index = create.math.constantIndex(i);
+        Value dim = create.krnl.load(operandAdaptor.input(), index);
+        Value dimIndex = create.math.castToIndex(dim);
         allocOperands.emplace_back(dimIndex);
       }
       // Allocate memory.
-      alloc = createMemRef.alignedAlloc(memRefType, allocOperands);
+      alloc = create.mem.alignedAlloc(memRefType, allocOperands);
       // Insert deallocation if needed.
       if (insertDealloc) {
         Block *parentBlock = alloc.getDefiningOp()->getBlock();
-        memref::DeallocOp dealloc = createMemRef.dealloc(alloc);
+        memref::DeallocOp dealloc = create.mem.dealloc(alloc);
         dealloc.getOperation()->moveBefore(&parentBlock->back());
       }
     }
@@ -72,25 +74,24 @@ struct ONNXConstantOfShapeOpLowering : public ConversionPattern {
       auto valueIt = valueAttr.getValues<FloatAttr>().begin();
       auto valueFloat = (*valueIt++).cast<FloatAttr>().getValueAsDouble();
       constantVal = emitConstantOp(rewriter, loc, elementType, valueFloat);
-    } else {
+    } else
       llvm_unreachable("unsupported element type");
-    }
 
-    SmallVector<Value, 4> loopIVs;
+    KrnlBuilder createKrnl(rewriter, loc);
     // Create a Krnl iterate if the output is not a scalar tensor.
     if (!hasAllScalarValues({alloc})) {
-      BuildKrnlLoop loops(rewriter, loc, rank);
-      loops.createDefineAndIterateOp(alloc);
-      Block *iterationBlock = loops.getIterateBlock();
-      // Get IVs.
-      for (auto arg : iterationBlock->getArguments())
-        loopIVs.push_back(arg);
-      // Insert instructions inside the KernelIterateOp body.
-      rewriter.setInsertionPointToStart(iterationBlock);
-    }
-
-    // Store the constant value to the output.
-    rewriter.create<KrnlStoreOp>(loc, constantVal, alloc, loopIVs);
+      IndexExprScope childScope(&rewriter, loc);
+      ValueRange loopDef = createKrnl.defineLoops(rank);
+      SmallVector<IndexExpr, 4> lbs(rank, LiteralIndexExpr(0));
+      MemRefBoundsIndexCapture allocBounds(alloc);
+      SmallVector<IndexExpr, 4> ubs;
+      allocBounds.getDimList(ubs);
+      createKrnl.iterateIE(loopDef, loopDef, lbs, ubs,
+          [&](KrnlBuilder &createKrnl, ValueRange loopInd) {
+            createKrnl.store(constantVal, alloc, loopInd);
+          });
+    } else
+      createKrnl.store(constantVal, alloc);
 
     // Replace this operation with the generated alloc.
     rewriter.replaceOp(op, alloc);
@@ -99,7 +100,9 @@ struct ONNXConstantOfShapeOpLowering : public ConversionPattern {
   }
 };
 
-void populateLoweringONNXConstantOfShapeOpPattern(
-    RewritePatternSet &patterns, MLIRContext *ctx) {
-  patterns.insert<ONNXConstantOfShapeOpLowering>(ctx);
+void populateLoweringONNXConstantOfShapeOpPattern(RewritePatternSet &patterns,
+    TypeConverter &typeConverter, MLIRContext *ctx) {
+  patterns.insert<ONNXConstantOfShapeOpLowering>(typeConverter, ctx);
 }
+
+} // namespace onnx_mlir
